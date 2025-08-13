@@ -27,16 +27,40 @@ jobs:
 
       # Sincroniza archivos al servidor (no sube .git, node_modules, vendor, ni tu .env)
       - name: Rsync project to server
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
-          RSYNC_EXCLUDES="\
-            --exclude='node_modules' \
-            --exclude='vendor' \
-            --exclude='storage/logs/*' \
-            --exclude='storage/framework/cache/*' \
-            --exclude='storage/framework/sessions/*' \
-            --exclude='storage/framework/views/*' \
-          "
-          rsync -az --delete $RSYNC_EXCLUDES ./ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ secrets.DEPLOY_PATH }}
+          set -euo pipefail
+      
+          # Verifica secrets
+          for v in SSH_USER SSH_HOST DEPLOY_PATH; do
+            if [ -z "${!v:-}" ]; then
+              echo "❌ Falta el secret $v"; exit 1
+            fi
+          done
+      
+          # Exclusiones como array (cada ítem es un arg separado)
+          RSYNC_EXCLUDES=(
+            --exclude='.git'
+            --exclude='.github'
+            --exclude='node_modules'
+            --exclude='vendor'
+            --exclude='.env'
+            --exclude='storage/logs/*'
+            --exclude='storage/framework/cache/*'
+            --exclude='storage/framework/sessions/*'
+            --exclude='storage/framework/views/*'
+          )
+      
+          # Host key y carpeta destino
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+          ssh "$SSH_USER@$SSH_HOST" "mkdir -p '$DEPLOY_PATH'"
+      
+          # rsync en UNA sola línea
+          rsync -az --delete "${RSYNC_EXCLUDES[@]}" -e "ssh -o StrictHostKeyChecking=yes" ./ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH"
 
       - name: Pull & deploy on server (git strategy)
         uses: appleboy/ssh-action@v1.0.3
