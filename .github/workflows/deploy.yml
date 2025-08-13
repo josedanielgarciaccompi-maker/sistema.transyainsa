@@ -29,19 +29,31 @@ jobs:
       - name: Rsync project to server
         env:
           SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}     # ej: 148.230.93.19  (solo IP/host)
+          SSH_PORT: ${{ secrets.SSH_PORT }}     # opcional, por defecto 22
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
           set -euo pipefail
       
-          # Verifica secrets
-          for v in SSH_USER SSH_HOST DEPLOY_PATH; do
+          # 1) Limpiar posibles CR/LF y espacios
+          SSH_HOST_CLEAN="$(printf %s "$SSH_HOST" | tr -d '\r' | xargs)"
+          SSH_PORT_CLEAN="${SSH_PORT:-22}"
+      
+          # 2) Validar que el host no tenga user/protocolo/puerto incrustados
+          #    Solo letras, números, punto y guion.
+          if [[ ! "$SSH_HOST_CLEAN" =~ ^[A-Za-z0-9.-]+$ ]]; then
+            echo "❌ SSH_HOST inválido: '$SSH_HOST_CLEAN'. Debe ser solo hostname o IP (sin usuario, sin puerto, sin protocolo)."
+            exit 1
+          fi
+      
+          # 3) Verificar secrets requeridos
+          for v in SSH_USER DEPLOY_PATH; do
             if [ -z "${!v:-}" ]; then
               echo "❌ Falta el secret $v"; exit 1
             fi
           done
       
-          # Exclusiones como array (cada ítem es un arg separado)
+          # 4) Exclusiones como array
           RSYNC_EXCLUDES=(
             --exclude='.git'
             --exclude='.github'
@@ -54,13 +66,16 @@ jobs:
             --exclude='storage/framework/views/*'
           )
       
-          # Host key y carpeta destino
+          # 5) Host key, carpeta destino y rsync
           mkdir -p ~/.ssh
-          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
-          ssh "$SSH_USER@$SSH_HOST" "mkdir -p '$DEPLOY_PATH'"
+          ssh-keyscan -H "$SSH_HOST_CLEAN" >> ~/.ssh/known_hosts
       
-          # rsync en UNA sola línea
-          rsync -az --delete "${RSYNC_EXCLUDES[@]}" -e "ssh -o StrictHostKeyChecking=yes" ./ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH"
+          ssh -p "$SSH_PORT_CLEAN" "$SSH_USER@$SSH_HOST_CLEAN" "mkdir -p '$DEPLOY_PATH'"
+      
+          rsync -avz --delete \
+            "${RSYNC_EXCLUDES[@]}" \
+            -e "ssh -p $SSH_PORT_CLEAN -o StrictHostKeyChecking=yes" \
+            ./ "$SSH_USER@$SSH_HOST_CLEAN:$DEPLOY_PATH"
 
       - name: Pull & deploy on server (git strategy)
         uses: appleboy/ssh-action@v1.0.3
