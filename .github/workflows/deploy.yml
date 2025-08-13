@@ -1,4 +1,4 @@
-name: Deploy to Server (transyainsa)
+name: Deploy to Server (transyainsa - git pull)
 
 on:
   push:
@@ -10,98 +10,73 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
+      # Solo para usar la clave SSH y entrar al servidor
       - name: Start SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      - name: Known hosts (add server fingerprint)
-        run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
-
-      # Sincroniza archivos al servidor (no sube .git, node_modules, vendor, ni tu .env)
-      - name: Rsync project to server
-        env:
-          SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_HOST: ${{ secrets.SSH_HOST }}     # ej: 148.230.93.19  (solo IP/host)
-          SSH_PORT: ${{ secrets.SSH_PORT }}     # opcional, por defecto 22
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-        run: |
-          set -euo pipefail
-      
-          # 1) Limpiar posibles CR/LF y espacios
-          SSH_HOST_CLEAN="$(printf %s "$SSH_HOST" | tr -d '\r' | xargs)"
-          SSH_PORT_CLEAN="${SSH_PORT:-22}"
-      
-          # 2) Validar que el host no tenga user/protocolo/puerto incrustados
-          #    Solo letras, números, punto y guion.
-          if [[ ! "$SSH_HOST_CLEAN" =~ ^[A-Za-z0-9.-]+$ ]]; then
-            echo "❌ SSH_HOST inválido: '$SSH_HOST_CLEAN'. Debe ser solo hostname o IP (sin usuario, sin puerto, sin protocolo)."
-            exit 1
-          fi
-      
-          # 3) Verificar secrets requeridos
-          for v in SSH_USER DEPLOY_PATH; do
-            if [ -z "${!v:-}" ]; then
-              echo "❌ Falta el secret $v"; exit 1
-            fi
-          done
-      
-          # 4) Exclusiones como array
-          RSYNC_EXCLUDES=(
-            --exclude='.git'
-            --exclude='.github'
-            --exclude='node_modules'
-            --exclude='vendor'
-            --exclude='.env'
-            --exclude='storage/logs/*'
-            --exclude='storage/framework/cache/*'
-            --exclude='storage/framework/sessions/*'
-            --exclude='storage/framework/views/*'
-          )
-      
-          # 5) Host key, carpeta destino y rsync
-          mkdir -p ~/.ssh
-          ssh-keyscan -H "$SSH_HOST_CLEAN" >> ~/.ssh/known_hosts
-      
-          ssh -p "$SSH_PORT_CLEAN" "$SSH_USER@$SSH_HOST_CLEAN" "mkdir -p '$DEPLOY_PATH'"
-      
-          rsync -avz --delete \
-            "${RSYNC_EXCLUDES[@]}" \
-            -e "ssh -p $SSH_PORT_CLEAN -o StrictHostKeyChecking=yes" \
-            ./ "$SSH_USER@$SSH_HOST_CLEAN:$DEPLOY_PATH"
-
-      - name: Pull & deploy on server (git strategy)
+      - name: Deploy via git pull on server
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
+          port: ${{ secrets.SSH_PORT || '22' }}
           script_stop: true
           script: |
-            set -e
-            cd ${{ secrets.DEPLOY_PATH }}
-            # Primera vez: git init + set remote si hace falta
+            set -euo pipefail
+
+            REPO_SSH="git@github.com:bryan2709/transyainsa.git"
+            APP_DIR="${{ secrets.DEPLOY_PATH }}"
+
+            # Prepara SSH del *servidor* para hablar con GitHub sin prompt
+            mkdir -p ~/.ssh
+            chmod 700 ~/.ssh
+            ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+
+            # Asegura carpeta destino
+            mkdir -p "$APP_DIR"
+            cd "$APP_DIR"
+
+            # Si no hay repo, inicializa y enlaza
             if [ ! -d .git ]; then
               git init
-              git remote add origin git@github.com:bryan2709/transyainsa.git || true
+              git remote add origin "$REPO_SSH" || true
               git fetch origin main
               git checkout -B main origin/main
             else
               git fetch origin main
+              # Opción segura para despliegues reproducibles
               git reset --hard origin/main
+              git clean -fd
             fi
 
-            # (igual que antes)
+            # Dependencias PHP
+            if ! command -v composer >/dev/null 2>&1; then
+              php -r "copy('https://getcomposer.org/installer','composer-setup.php');"
+              php composer-setup.php --install-dir=/usr/local/bin --filename=composer
+              rm -f composer-setup.php
+            fi
             composer install --no-interaction --prefer-dist --optimize-autoloader --no-dev
-            php artisan config:cache && php artisan route:cache && php artisan view:cache
-            npm ci && npm run build || true
+
+            # Laravel: caches (migraciones si corresponde)
+            php artisan config:cache || true
+            php artisan route:cache || true
+            php artisan view:cache || true
+
+            # Frontend (opcional: solo si existe package.json)
+            if [ -f package.json ]; then
+              if ! command -v npm >/dev/null 2>&1; then
+                curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+                apt-get update && apt-get install -y nodejs
+              fi
+              npm ci
+              npm run build
+            fi
+
+            # Permisos Laravel
             chown -R www-data:www-data storage bootstrap/cache || true
             chmod -R ug+rw storage bootstrap/cache || true
-            systemctl reload apache2 2>/dev/null || systemctl reload nginx 2>/dev/null || true
 
+            # Reload web server
+            systemctl reload apache2 2>/dev/null || systemctl reload nginx 2>/dev/null || true
