@@ -1,0 +1,82 @@
+name: Deploy to Server (transyainsa)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Known hosts (add server fingerprint)
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      # Sincroniza archivos al servidor (no sube .git, node_modules, vendor, ni tu .env)
+      - name: Rsync project to server
+        run: |
+          RSYNC_EXCLUDES="\
+            --exclude='node_modules' \
+            --exclude='vendor' \
+            --exclude='storage/logs/*' \
+            --exclude='storage/framework/cache/*' \
+            --exclude='storage/framework/sessions/*' \
+            --exclude='storage/framework/views/*' \
+          "
+          rsync -az --delete $RSYNC_EXCLUDES ./ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ secrets.DEPLOY_PATH }}
+
+      # Post-deploy: dependencias, build, caches y permisos
+      - name: Post-deploy (composer, npm, artisan)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          script_stop: true
+          script: |
+            set -e
+            cd ${{ secrets.SSH_DEPLOY_PATH || secrets.DEPLOY_PATH }}
+
+            # Composer (instala global si no existe)
+            if ! command -v composer >/dev/null 2>&1; then
+              php -r "copy('https://getcomposer.org/installer','composer-setup.php');"
+              php composer-setup.php --install-dir=/usr/local/bin --filename=composer
+              rm -f composer-setup.php
+            fi
+
+            # Dependencias PHP (sin dev, optimizado)
+            composer install --no-interaction --prefer-dist --optimize-autoloader --no-dev
+
+            # Migraciones y caches de Laravel (no fallar si key ya existe)
+            php artisan config:cache
+            php artisan route:cache
+            php artisan view:cache
+
+            # Node y build front (instalar si no hay node)
+            if ! command -v npm >/dev/null 2>&1; then
+              curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+              apt-get update && apt-get install -y nodejs
+            fi
+            if [ -f package.json ]; then
+              npm ci
+              npm run build
+            fi
+
+            # Permisos típicos Laravel
+            chown -R www-data:www-data storage bootstrap/cache || true
+            chmod -R ug+rw storage bootstrap/cache || true
+
+            # Reload del web server (apache o nginx)
+            systemctl reload apache2 2>/dev/null || systemctl reload nginx 2>/dev/null || true
