@@ -10,18 +10,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Solo para usar la clave SSH y entrar al servidor
-      - name: Start SSH agent
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
       - name: Deploy via git pull on server
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          port: ${{ secrets.SSH_PORT || '22' }}
+          host: ${{ secrets.SSH_HOST }}              # ej: 148.230.93.19
+          username: ${{ secrets.SSH_USER }}          # ej: root o deploy
+          port: ${{ secrets.SSH_PORT || '22' }}      # si no pones secret, usa 22
+          key: ${{ secrets.SSH_PRIVATE_KEY }}        # clave privada para entrar al servidor
           script_stop: true
           script: |
             set -euo pipefail
@@ -29,16 +24,15 @@ jobs:
             REPO_SSH="git@github.com:bryan2709/transyainsa.git"
             APP_DIR="${{ secrets.DEPLOY_PATH }}"
 
-            # Prepara SSH del *servidor* para hablar con GitHub sin prompt
-            mkdir -p ~/.ssh
-            chmod 700 ~/.ssh
+            # Preparar SSH del servidor para hablar con GitHub
+            mkdir -p ~/.ssh && chmod 700 ~/.ssh
             ssh-keyscan -H github.com >> ~/.ssh/known_hosts
 
-            # Asegura carpeta destino
+            # Crear carpeta de la app si no existe
             mkdir -p "$APP_DIR"
             cd "$APP_DIR"
 
-            # Si no hay repo, inicializa y enlaza
+            # Clonar/actualizar repo
             if [ ! -d .git ]; then
               git init
               git remote add origin "$REPO_SSH" || true
@@ -46,25 +40,27 @@ jobs:
               git checkout -B main origin/main
             else
               git fetch origin main
-              # Opción segura para despliegues reproducibles
               git reset --hard origin/main
               git clean -fd
             fi
 
-            # Dependencias PHP
+            # Composer (instala si no existe)
             if ! command -v composer >/dev/null 2>&1; then
               php -r "copy('https://getcomposer.org/installer','composer-setup.php');"
               php composer-setup.php --install-dir=/usr/local/bin --filename=composer
               rm -f composer-setup.php
             fi
+
+            # Dependencias PHP
             composer install --no-interaction --prefer-dist --optimize-autoloader --no-dev
 
-            # Laravel: caches (migraciones si corresponde)
+            # Caches de Laravel (descomenta migraciones si corresponde)
             php artisan config:cache || true
             php artisan route:cache || true
             php artisan view:cache || true
+            # php artisan migrate --force || true
 
-            # Frontend (opcional: solo si existe package.json)
+            # Frontend si aplica
             if [ -f package.json ]; then
               if ! command -v npm >/dev/null 2>&1; then
                 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
@@ -78,5 +74,5 @@ jobs:
             chown -R www-data:www-data storage bootstrap/cache || true
             chmod -R ug+rw storage bootstrap/cache || true
 
-            # Reload web server
+            # Reload del web server
             systemctl reload apache2 2>/dev/null || systemctl reload nginx 2>/dev/null || true
