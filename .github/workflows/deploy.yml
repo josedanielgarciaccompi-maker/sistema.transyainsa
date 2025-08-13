@@ -38,8 +38,7 @@ jobs:
           "
           rsync -az --delete $RSYNC_EXCLUDES ./ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ secrets.DEPLOY_PATH }}
 
-      # Post-deploy: dependencias, build, caches y permisos
-      - name: Post-deploy (composer, npm, artisan)
+      - name: Pull & deploy on server (git strategy)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -47,36 +46,23 @@ jobs:
           script_stop: true
           script: |
             set -e
-            cd ${{ secrets.SSH_DEPLOY_PATH || secrets.DEPLOY_PATH }}
-
-            # Composer (instala global si no existe)
-            if ! command -v composer >/dev/null 2>&1; then
-              php -r "copy('https://getcomposer.org/installer','composer-setup.php');"
-              php composer-setup.php --install-dir=/usr/local/bin --filename=composer
-              rm -f composer-setup.php
+            cd ${{ secrets.DEPLOY_PATH }}
+            # Primera vez: git init + set remote si hace falta
+            if [ ! -d .git ]; then
+              git init
+              git remote add origin git@github.com:bryan2709/transyainsa.git || true
+              git fetch origin main
+              git checkout -B main origin/main
+            else
+              git fetch origin main
+              git reset --hard origin/main
             fi
 
-            # Dependencias PHP (sin dev, optimizado)
+            # (igual que antes)
             composer install --no-interaction --prefer-dist --optimize-autoloader --no-dev
-
-            # Migraciones y caches de Laravel (no fallar si key ya existe)
-            php artisan config:cache
-            php artisan route:cache
-            php artisan view:cache
-
-            # Node y build front (instalar si no hay node)
-            if ! command -v npm >/dev/null 2>&1; then
-              curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-              apt-get update && apt-get install -y nodejs
-            fi
-            if [ -f package.json ]; then
-              npm ci
-              npm run build
-            fi
-
-            # Permisos típicos Laravel
+            php artisan config:cache && php artisan route:cache && php artisan view:cache
+            npm ci && npm run build || true
             chown -R www-data:www-data storage bootstrap/cache || true
             chmod -R ug+rw storage bootstrap/cache || true
-
-            # Reload del web server (apache o nginx)
             systemctl reload apache2 2>/dev/null || systemctl reload nginx 2>/dev/null || true
+
